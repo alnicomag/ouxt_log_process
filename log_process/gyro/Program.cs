@@ -5,6 +5,7 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using SharpPlot;
+using System.Diagnostics;
 
 namespace gyro
 {
@@ -19,16 +20,17 @@ namespace gyro
 		private static string stInputDir;
 		private static string stOutputDir;
 
-		private static List<LogData> logdata = new List<LogData>();
+		private static List<SixAxisLog> logdata = new List<SixAxisLog>();
+
+		private static readonly double QUARRY_SPAN = 300;		// データ切り出し間隔[秒]
 
 		static void Main(string[] args)
 		{
 			List<string> filefullpaths = Directory.EnumerateFiles(stInputDir, "*.csv", SearchOption.TopDirectoryOnly).ToList();
-			
 
 			foreach (string item in filefullpaths)
 			{
-				logdata.Add(new LogData());
+				logdata.Add(new SixAxisLog());
 				int index = logdata.Count - 1;
 				using (StreamReader sr = new StreamReader(item))
 				{
@@ -38,20 +40,23 @@ namespace gyro
 					{
 						line = sr.ReadLine();
 						string[] div_line = line.Split(',');
-						logdata[index].time.Add(ParseDateTime(div_line[0]));
-						logdata[index].x.Add(Double.Parse(div_line[1]));
-						logdata[index].y.Add(Double.Parse(div_line[2]));
-						logdata[index].z.Add(Double.Parse(div_line[3]));
+						logdata[index].SetRecord(ParseDateTime(div_line[0]), Double.Parse(div_line[1]), Double.Parse(div_line[2]), Double.Parse(div_line[3]));
 					}
 				}
 				logdata[index].OffsetTime();
-				WriteLogData(Path.Combine(stOutputDir, logdata[index].Lable + ".txt"), logdata[index]);
 			}
 
-			PlotLogData(Path.Combine(stOutputDir, logdata[1].Lable + ".txt"), Path.Combine(stOutputDir, logdata[0].Lable + ".txt"));
+			foreach (var item in logdata)
+			{
+				WriteLog(item);
+			}
+
+			Debug.Assert(logdata[0].Lable == "left", "データ名称が異なります");
+			Debug.Assert(logdata[1].Lable == "right", "データ名称が異なります");
+			List<string> left = WriteLog(logdata[0]);
+			List<string> right = WriteLog(logdata[1]);
+			PlotLog(left, right);
 		}
-
-
 
 		static double ParseDateTime(string arg)
 		{
@@ -64,82 +69,161 @@ namespace gyro
 			return second;
 		}
 
-		private static void WriteLogData(string path, LogData data)
+		/// <summary>
+		/// gnuplotに渡すためにデータをファイルに書き出す．一定の時間ごとにデータを分割する．
+		/// </summary>
+		/// <param name="log"></param>
+		/// <returns>分割されたデータに対して命名された全てのファイル名（拡張子含む）を返す</returns>
+		private static List<string> WriteLog(SixAxisLog log)
 		{
 			if (!Directory.Exists(stOutputDir))
 			{
 				Directory.CreateDirectory(stOutputDir);
 			}
 
-			using (StreamWriter sw = new StreamWriter(path))
+			List<SixAxisLog> divlog = new List<SixAxisLog>();
+			int loop = 0;
+			SixAxisLog temp;
+			while ((temp = log.RecordQuarry(log.Lable + "_" + loop.ToString(), QUARRY_SPAN * loop, QUARRY_SPAN * (loop + 1))) != null)
 			{
-				sw.WriteLine("#{0}\t{1}\t{2}\t{3}", "time[s]", "x", "y", "z");
-				for (int i = 0; i < data.time.Count; i++)
+				divlog.Add(temp);
+				loop++;
+			}
+
+			List<string> filenames = new List<string>();
+			for (int i = 0; i < divlog.Count; i++)
+			{
+				filenames.Add(divlog[i].Lable + ".txt");
+				using (StreamWriter sw = new StreamWriter(Path.Combine(stOutputDir, divlog[i].Lable + ".txt")))
 				{
-					sw.WriteLine("{0:f6}\t{1:e3}\t{2:e3}\t{3:e3}", data.time[i], data.x[i], data.y[i], data.z[i]); 
+					sw.WriteLine("#{0}\t{1}\t{2}\t{3}", "time[s]", "yaw[degree]", "pitch[degree]", "roll[degree]");
+					for (int j = 0; j < divlog[i].Count; j++)
+					{
+						var record = divlog[i].GetRecord(j);
+						sw.WriteLine("{0:f6}\t{1:e3}\t{2:e3}\t{3:e3}", record.Item1, record.Item2, record.Item3, record.Item4);
+					}
 				}
 			}
+			return filenames;
 		}
 
-		private static void PlotLogData(string path_r,string path_l)
+
+
+		private static void PlotLog(List<string> data_filenames_r, List<string> data_filenames_l)
 		{
-			#region gnuplot
-			using (PlotStream gnuplot = new PlotStream())
+			int num = Math.Max(data_filenames_r.Count, data_filenames_l.Count);
+			
+
+			for (int i = 0; i < num; i++)
 			{
-				gnuplot.Start();
-				gnuplot.ChangeDirectory(stOutputDir);
-				gnuplot.SetLineStyle(1, new LineStyle(1, 1, Color.Green));
-				gnuplot.SetLineStyle(2, new LineStyle(1, 1, Color.Blue));
-				gnuplot.SetLineStyle(3, new LineStyle(1, 1, Color.Red));
-				gnuplot.SetLineStyle(4, new LineStyle(1, 1, Color.Purple));
-				gnuplot.SetLineStyle(5, new LineStyle(1, 1, Color.Cyan));
-				gnuplot.SetLineStyle(6, new LineStyle(1, 1, Color.Black));
+				string fig_filename = "6AxisLog_" + i.ToString()+".eps";
+				string data_file_path_r = Path.Combine(stOutputDir, data_filenames_r[i]);
+				string data_file_path_l = Path.Combine(stOutputDir, data_filenames_l[i]);
+				double x_range_start = QUARRY_SPAN * i;
+				double x_range_end = QUARRY_SPAN * (i+1);
 
-				gnuplot.SetLegendPosition(LegendPosition.left,LegendPosition.top);
-				gnuplot.SetLegendFont(24, "Helvetica");
-				//gnuplot.SetLegendTitle("");
+				#region gnuplot
+				using (PlotStream gnuplot = new PlotStream())
+				{
+					gnuplot.Start();
+					gnuplot.ChangeDirectory(stOutputDir);
+					gnuplot.SetLineStyle(1, new LineStyle(1, 1, Color.Green));
+					gnuplot.SetLineStyle(2, new LineStyle(1, 1, Color.Blue));
+					gnuplot.SetLineStyle(3, new LineStyle(1, 1, Color.Red));
+					gnuplot.SetLineStyle(4, new LineStyle(1, 1, Color.Purple));
+					gnuplot.SetLineStyle(5, new LineStyle(1, 1, Color.Cyan));
+					gnuplot.SetLineStyle(6, new LineStyle(1, 1, Color.Black));
 
-				gnuplot.SetXLabel("time [s]", 36, "Helvetica");
-				gnuplot.SetYLabel("??", 36, "Helvetica");
+					gnuplot.SetLegendPosition(LegendPosition.left, LegendPosition.top);
+					gnuplot.SetLegendFont(24, "Helvetica");
+					//gnuplot.SetLegendTitle("");
 
-				gnuplot.SetTicsFont(28, "Helvetica");
-				gnuplot.SetXRange(0, 3200);
-				gnuplot.SetXTics(0, 400, false);
-				gnuplot.SetYRange(-250, 250);
-				gnuplot.SetYTics(-250, 25);
+					gnuplot.SetXLabel("time [s]", 36, "Helvetica");
+					gnuplot.SetYLabel("angle[degrees]", 36, "Helvetica");
 
-				gnuplot.SetMargin(7.5, 10.5, 1, 3.5);
-				gnuplot.SetGrid();
+					gnuplot.SetTicsFont(28, "Helvetica");
+					gnuplot.SetXRange(x_range_start, x_range_end);
+					gnuplot.SetXTics(x_range_start, QUARRY_SPAN/10, false);
+					gnuplot.SetYRange(-20, 20);
+					gnuplot.SetYTics(-20, 2);
 
-				gnuplot.PlotFromFile(path_r, 1, 2, PlottingStyle.lines, 1, PlotAxis.x1y1, "right x");
-				gnuplot.ReplotFromFile(path_r, 1, 3, PlottingStyle.lines, 2, PlotAxis.x1y1, "right y");
-				gnuplot.ReplotFromFile(path_r, 1, 4, PlottingStyle.lines, 3, PlotAxis.x1y1, "right z");
-				gnuplot.ReplotFromFile(path_l, 1, 2, PlottingStyle.lines, 4, PlotAxis.x1y1, "left x");
-				gnuplot.ReplotFromFile(path_l, 1, 3, PlottingStyle.lines, 5, PlotAxis.x1y1, "left y");
-				gnuplot.ReplotFromFile(path_l, 1, 4, PlottingStyle.lines, 6, PlotAxis.x1y1, "left z");
+					gnuplot.SetMargin(7.5, 10.5, 1, 3.5);
+					gnuplot.SetGrid();
 
-				gnuplot.SetTerminal(Terminal.postscript, 20, 14, 28, "Helvetica");
-				gnuplot.SetOutput("gyro" + ".eps");
-				gnuplot.Replot();
-				gnuplot.SetOutput();
-				gnuplot.Stream.WriteLine("unset style line");
-				gnuplot.Stream.WriteLine("set terminal wxt");
+					gnuplot.PlotFromFile(data_file_path_r, 1, 3, PlottingStyle.lines, 1, PlotAxis.x1y1, "right pitch");
+					gnuplot.ReplotFromFile(data_file_path_r, 1, 4, PlottingStyle.lines, 2, PlotAxis.x1y1, "right roll");
+					gnuplot.ReplotFromFile(data_file_path_l, 1, 3, PlottingStyle.lines, 3, PlotAxis.x1y1, "left pitch");
+					gnuplot.ReplotFromFile(data_file_path_l, 1, 4, PlottingStyle.lines, 4, PlotAxis.x1y1, "left roll");
 
-			#endregion
+					gnuplot.SetTerminal(Terminal.postscript, 20, 14, 28, "Helvetica");
+					gnuplot.SetOutput(fig_filename);
+					gnuplot.Replot();
+					gnuplot.SetOutput();
+					gnuplot.Stream.WriteLine("unset style line");
+					gnuplot.Stream.WriteLine("set terminal wxt");
+				}
+				#endregion
+
+			}
+
 
 			
-			}
 		}
 	}
 
-	class LogData
+	class SixAxisLog
 	{
-		public string Lable { get; set; }
+		public SixAxisLog()
+		{
+			time = new List<double>();
+			yaw = new List<double>();
+			pitch = new List<double>();
+			roll = new List<double>();
+		}
 
-		public List<double> time = new List<double>();
-		public List<double> x=new List<double>();
-		public List<double> y=new List<double>();
-		public List<double> z=new List<double>();
+		public string Lable { get; set; }
+		public int Count { get { return time.Count; } }
+
+		public void SetRecord(double time, double yaw,double pitch,double roll)
+		{
+			this.time.Add(time);
+			this.yaw.Add(yaw);
+			this.pitch.Add(pitch);
+			this.roll.Add(roll);
+		}
+
+		public Tuple<double, double, double, double> GetRecord(int index)
+		{
+			if (index >= time.Count)
+			{
+				throw new IndexOutOfRangeException();
+			}
+			return new Tuple<double, double, double, double>(time[index], yaw[index], pitch[index], roll[index]);
+		}
+
+		/// <summary>
+		/// 開始時刻（含む）と終了時刻（含まない）を指定してデータを切り出す
+		/// </summary>
+		/// <param name="start"></param>
+		/// <param name="end"></param>
+		/// <returns>該当するデータが存在しない場合はnullを返す</returns>
+		public SixAxisLog RecordQuarry(string newlabel, double start, double end)
+		{
+			var ret = new SixAxisLog();
+			ret.Lable = newlabel;
+			for (int i = 0; i < Count; i++)
+			{
+				if ((start <= time[i]) && (time[i] < end))
+				{
+					ret.SetRecord(time[i], yaw[i], pitch[i], roll[i]);
+				}
+			}
+			if (ret.Count == 0)
+			{
+				return null;
+			}
+			return ret;
+		}
 
 		public void OffsetTime()
 		{
@@ -154,5 +238,10 @@ namespace gyro
 				time[i] -= offset;
 			}
 		}
+
+		private List<double> time;
+		private List<double> yaw;
+		private List<double> pitch;
+		private List<double> roll;
 	}
 }
